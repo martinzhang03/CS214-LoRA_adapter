@@ -50,7 +50,7 @@ class AdapterManager:
         self.adapter_tensor_size = adapter_tensor_size
 
         if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
         self.gpu_device = torch.device(device)
         self.cpu_device = torch.device("cpu")
 
