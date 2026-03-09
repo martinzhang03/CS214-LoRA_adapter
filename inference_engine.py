@@ -185,7 +185,8 @@ class InferenceEngine:
 
         # --- Load adapter into VRAM ---
         try:
-            adapter_tensor, was_swap = self._am.get_adapter(adapter_id)
+            # adapter_tensor, was_swap = self._am.get_adapter(adapter_id)
+            adapter_tensor, was_swap = self._am.get_or_create_adapter_in_vram(adapter_id)
         except Exception as exc:
             # Adapter load failed — fail the entire batch gracefully.
             error_msg = f"AdapterManager.get_adapter failed: {exc}"
