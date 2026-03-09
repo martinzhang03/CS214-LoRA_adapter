@@ -118,7 +118,7 @@ class BaseModelManager:
         self.lora_scale: float = lora_alpha / lora_rank
 
         if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
         self.device = torch.device(device)
 
         self._lock = threading.Lock()
@@ -217,7 +217,7 @@ class BaseModelManager:
 
         Args:
             x: Input tensor of shape (batch_size, hidden_dim).
-            adapter_tensor: Flat GPU tensor from AdapterManager.get_adapter().
+            adapter_tensor: Flat GPU tensor from AdapterManager.get_or_create_adapter_in_vram().
 
         Returns:
             Output tensor of shape (batch_size, hidden_dim).

@@ -24,7 +24,7 @@ Typical call pattern
     scheduler.submit(InferenceRequest("req-1", adapter_id="lora-A", payload=...))
     batch = scheduler.next_batch(max_batch_size=8)
     for req in batch:
-        tensor, _ = adapter_manager.get_adapter(req.adapter_id)
+        tensor, _ = adapter_manager.get_or_create_adapter(req.adapter_id)
         # ... run inference ...
         scheduler.mark_complete(req.request_id)
 """
@@ -233,9 +233,10 @@ class RequestScheduler:
 
         # --- Step 4: prefetch next adapter ---
         if self.prefetch:
+            # ! TODO: this should be modified to be non-blocking, and we should add a lock in adapter manager
             next_adapter = self._predict_next_adapter(exclude=chosen_adapter)
             if next_adapter:
-                self._am.ensure_in_vram(next_adapter)
+                self._am.ensure_adapter_in_vram(next_adapter)
                 self.stats.prefetch_calls += 1
 
         return batch

@@ -67,7 +67,7 @@ class AdapterManager:
         self._swap_count = 0   # number of evictions (VRAM -> RAM)
         self._load_count = 0  # number of loads (RAM -> VRAM or new -> VRAM)
 
-    def get_adapter(self, adapter_id: str) -> tuple[torch.Tensor, bool]:
+    def get_or_create_adapter_in_vram(self, adapter_id: str) -> tuple[torch.Tensor, bool]:
         """
         Ensure the adapter is in VRAM and return its tensor. Uses LRU eviction
         when VRAM is full and the adapter is not present.
@@ -107,12 +107,14 @@ class AdapterManager:
         self._vram_pool[adapter_id] = tensor
         return tensor, was_swap
 
-    def ensure_in_vram(self, adapter_id: str) -> bool:
+    def ensure_adapter_in_vram(self, adapter_id: str) -> bool:
         """
         Prefetch: ensure adapter is in VRAM without returning the tensor.
         Returns True if a swap (eviction + load) occurred.
+
+        ! Note, when ensure in vram is called, it will move the adapter to the end of the vram pool
         """
-        _, was_swap = self.get_adapter(adapter_id)
+        _, was_swap = self.get_or_create_adapter_in_vram(adapter_id)
         return was_swap
 
     def create_adapter_in_ram(self, adapter_id: str) -> None:
