@@ -453,9 +453,9 @@ def run_experiment_f_multi_gpu_routing_large():
     print("\nSaved high-res chart to 'large_scale_multi_gpu.png'.")
 
 if __name__ == "__main__":
-    # run_experiment_a_scheduler_efficiency()
-    # run_experiment_b_memory_scalability()
-    # run_experiment_c_prefetching_overlap()  
-    # run_experiment_d_staircase_latency()
+    run_experiment_a_scheduler_efficiency()
+    run_experiment_b_memory_scalability()
+    run_experiment_c_prefetching_overlap()  
+    run_experiment_d_staircase_latency()
     run_experiment_e_multi_gpu_routing()
     run_experiment_f_multi_gpu_routing_large()
