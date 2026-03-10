@@ -12,6 +12,7 @@ from adapter_manager import AdapterManager
 from base_model_manager import BaseModelManager
 from scheduler import RequestScheduler
 from inference_engine import InferenceEngine
+from cluster import WorkerNode, GlobalGateway
 
 # Common Model Params
 HIDDEN_DIM = 1024
@@ -250,9 +251,211 @@ def run_experiment_d_staircase_latency():
     plt.savefig("staircase_latency.png")
     print("Saved chart to 'staircase_latency.png'.")
 
+def run_experiment_e_multi_gpu_routing():
+    """
+    Experiment E: Multi-GPU Affinity Routing (Realistic Streaming)
+    Simulates a continuous stream of requests to prove that the gateway 
+    shards adapters effectively over time, reducing cumulative VRAM swaps.
+    """
+    print("\n" + "="*50)
+    print("EXPERIMENT E: MULTI-GPU AFFINITY ROUTING (STREAMING)")
+    print("="*50)
+
+    NUM_GPUS = 4
+    VRAM_PER_GPU = 3
+    HIDDEN_DIM, LORA_RANK = 1024, 16
+    
+    gen = TraceGenerator(seed=99)
+    # 500 requests, 20 adapters. Cluster holds 12 total.
+    trace = gen.generate_skewed_trace(num_requests=500, num_adapters=20)
+
+    # --- Helper to simulate realistic request streaming ---
+    def simulate_stream(trace_subset, is_affinity=False, gateway=None, workers=None):
+        swap_history = [0]
+        
+        # 1. Interleave routing and execution
+        for idx, req in enumerate(trace_subset):
+            if is_affinity:
+                gateway.route(req)
+            else:
+                workers[idx % NUM_GPUS].sched.submit(req)
+            
+            # Every 5 requests that arrive, pulse the cluster to process a batch
+            # This prevents queues from infinitely overflowing (continuous streaming)
+            if (idx + 1) % 5 == 0:
+                for w in workers:
+                    if w.queue_depth() > 0 or w.sched.in_flight_count() > 0:
+                        w.engine.step(max_batch_size=8)
+                swap_history.append(sum(w.am.swap_count() for w in workers))
+                
+        # 2. Drain the remaining queue at the end of the trace
+        active = True
+        while active:
+            active = False
+            for w in workers:
+                if w.queue_depth() > 0 or w.sched.in_flight_count() > 0:
+                    w.engine.step(max_batch_size=8)
+                    active = True
+            if active:
+                swap_history.append(sum(w.am.swap_count() for w in workers))
+                
+        return swap_history
+
+    # --- TEST 1: Naive Round-Robin (No Affinity) ---
+    workers_rr = [WorkerNode(i, VRAM_PER_GPU, HIDDEN_DIM, LORA_RANK) for i in range(NUM_GPUS)]
+    rr_history = simulate_stream(trace, is_affinity=False, workers=workers_rr)
+    rr_swaps = sum(w.am.swap_count() for w in workers_rr)
+
+    # --- TEST 2: Affinity Gateway ---
+    workers_aff = [WorkerNode(i, VRAM_PER_GPU, HIDDEN_DIM, LORA_RANK) for i in range(NUM_GPUS)]
+    # We can use a realistic queue limit now because the stream constantly drains!
+    gateway = GlobalGateway(workers_aff, max_queue_per_worker=20) 
+    aff_history = simulate_stream(trace, is_affinity=True, gateway=gateway, workers=workers_aff)
+    aff_swaps = sum(w.am.swap_count() for w in workers_aff)
+
+    # --- Print Output ---
+    print(f"Total Requests:       {len(trace)}")
+    print(f"Cluster Capacity:     {NUM_GPUS * VRAM_PER_GPU} VRAM Slots")
+    print(f"Round-Robin Swaps:    {rr_swaps}")
+    print(f"Affinity Router Swaps:{aff_swaps}")
+    
+    if rr_swaps > 0:
+        print(f"Swap Reduction:       {((rr_swaps - aff_swaps) / rr_swaps) * 100:.1f}%\n")
+
+    print("Final VRAM State across Affinity Workers:")
+    for w in workers_aff:
+        print(f"  GPU {w.node_id} Adapters: {w.am.vram_ids()}")
+
+    # --- Generate Graph ---
+    plt.figure(figsize=(8, 5))
+    
+    # X-axis represents simulation "ticks"
+    x_ticks_rr = range(len(rr_history))
+    x_ticks_aff = range(len(aff_history))
+    
+    plt.plot(x_ticks_rr, rr_history, label='Round-Robin Router', color='red', linestyle='--', linewidth=2)
+    plt.plot(x_ticks_aff, aff_history, label='Affinity Router', color='blue', linewidth=2)
+    
+    plt.title("Cumulative VRAM Swaps over Time (Multi-GPU)")
+    plt.xlabel("Simulation Steps (Time)")
+    plt.ylabel("Cumulative Swaps (Context Switches)")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    
+    plt.savefig("multi_gpu_routing.png")
+    print("\nSaved chart to 'multi_gpu_routing.png'.")
+
+def run_experiment_f_multi_gpu_routing_large():
+    """
+    Experiment F: Multi-GPU Affinity Routing (Massive Scale Streaming)
+    Simulates a large-scale cluster with heavy traffic to prove that 
+    the gateway shards adapters effectively over time, even under severe 
+    memory contention.
+    """
+    print("\n" + "="*50)
+    print("EXPERIMENT F: MULTI-GPU AFFINITY ROUTING (LARGE SCALE)")
+    print("="*50)
+
+    # --- SCALED UP PARAMETERS ---
+    NUM_GPUS = 8
+    VRAM_PER_GPU = 4  # Total cluster capacity = 32 VRAM slots
+    HIDDEN_DIM, LORA_RANK = 1024, 16
+    
+    gen = TraceGenerator(seed=101)
+    
+    # 2000 requests spread across 100 unique adapters.
+    # Because 100 > 32 slots, VRAM evictions are GUARANTEED. 
+    # We want to see how well the router minimizes them.
+    trace = gen.generate_skewed_trace(num_requests=2000, num_adapters=100)
+
+    # --- Helper to simulate realistic request streaming ---
+    def simulate_stream(trace_subset, is_affinity=False, gateway=None, workers=None):
+        swap_history = [0]
+        
+        for idx, req in enumerate(trace_subset):
+            if is_affinity:
+                gateway.route(req)
+            else:
+                # Naive deals them like a deck of cards
+                workers[idx % NUM_GPUS].sched.submit(req)
+            
+            # PULSE ADJUSTMENT: Every 12 requests that arrive, the cluster steps forward.
+            # This mimics a highly concurrent environment under heavy load.
+            if (idx + 1) % 12 == 0:
+                for w in workers:
+                    if w.queue_depth() > 0 or w.sched.in_flight_count() > 0:
+                        w.engine.step(max_batch_size=8)
+                swap_history.append(sum(w.am.swap_count() for w in workers))
+                
+        # Drain the remaining queues at the end of the traffic spike
+        active = True
+        while active:
+            active = False
+            for w in workers:
+                if w.queue_depth() > 0 or w.sched.in_flight_count() > 0:
+                    w.engine.step(max_batch_size=8)
+                    active = True
+            if active:
+                swap_history.append(sum(w.am.swap_count() for w in workers))
+                
+        return swap_history
+
+    # --- TEST 1: Naive Round-Robin ---
+    workers_rr = [WorkerNode(i, VRAM_PER_GPU, HIDDEN_DIM, LORA_RANK) for i in range(NUM_GPUS)]
+    rr_history = simulate_stream(trace, is_affinity=False, workers=workers_rr)
+    rr_swaps = sum(w.am.swap_count() for w in workers_rr)
+
+    # --- TEST 2: Affinity Gateway ---
+    workers_aff = [WorkerNode(i, VRAM_PER_GPU, HIDDEN_DIM, LORA_RANK) for i in range(NUM_GPUS)]
+    # Queue limit set to 30. If a GPU gets >30 pending requests, it forces spillover to prevent hot-spotting.
+    gateway = GlobalGateway(workers_aff, max_queue_per_worker=30) 
+    aff_history = simulate_stream(trace, is_affinity=True, gateway=gateway, workers=workers_aff)
+    aff_swaps = sum(w.am.swap_count() for w in workers_aff)
+
+    # --- Print Output ---
+    print(f"Total Requests:       {len(trace)}")
+    print(f"Unique Adapters:      100")
+    print(f"Cluster Capacity:     {NUM_GPUS * VRAM_PER_GPU} VRAM slots across {NUM_GPUS} GPUs")
+    print("-" * 50)
+    print(f"Round-Robin Swaps:    {rr_swaps}")
+    print(f"Affinity Router Swaps:{aff_swaps}")
+    
+    if rr_swaps > 0:
+        print(f"Swap Reduction:       {((rr_swaps - aff_swaps) / rr_swaps) * 100:.1f}%\n")
+
+    print("Final VRAM State across Affinity Workers (Showing first 4 GPUs):")
+    for w in workers_aff[:4]:
+        print(f"  GPU {w.node_id} Adapters: {w.am.vram_ids()}")
+
+    # --- Generate Publication-Ready Graph ---
+    plt.figure(figsize=(10, 6))
+    
+    x_ticks_rr = range(len(rr_history))
+    x_ticks_aff = range(len(aff_history))
+    
+    # Thicker lines and distinct colors
+    plt.plot(x_ticks_rr, rr_history, label='Round-Robin Router (Naive)', color='#e74c3c', linestyle='--', linewidth=2.5)
+    plt.plot(x_ticks_aff, aff_history, label='Affinity Router (Proposed)', color='#2ecc71', linewidth=2.5)
+    
+    # Annotate the graph to highlight the difference
+    plt.text(len(rr_history)*0.55, rr_history[-1]*0.8, f"Massive Thrashing:\n{rr_swaps} Swaps", color='#c0392b', fontsize=11, fontweight='bold')
+    plt.text(len(aff_history)*0.55, aff_history[-1] + (rr_history[-1]*0.05), f"Stabilized Sharding:\n{aff_swaps} Swaps", color='#27ae60', fontsize=11, fontweight='bold')
+
+    plt.title(f"Large-Scale Cluster Performance ({NUM_GPUS} GPUs, 2000 Requests)", fontsize=14, fontweight='bold')
+    plt.xlabel("Simulation Steps (Time)", fontsize=12)
+    plt.ylabel("Cumulative Swaps (Context Switches)", fontsize=12)
+    plt.legend(fontsize=11, loc="upper left")
+    plt.grid(True, alpha=0.4, linestyle='--')
+    plt.tight_layout()
+    
+    plt.savefig("large_scale_multi_gpu.png", dpi=300)
+    print("\nSaved high-res chart to 'large_scale_multi_gpu.png'.")
 
 if __name__ == "__main__":
-    run_experiment_a_scheduler_efficiency()
-    run_experiment_b_memory_scalability()
-    run_experiment_c_prefetching_overlap()  
-    run_experiment_d_staircase_latency()
+    # run_experiment_a_scheduler_efficiency()
+    # run_experiment_b_memory_scalability()
+    # run_experiment_c_prefetching_overlap()  
+    # run_experiment_d_staircase_latency()
+    run_experiment_e_multi_gpu_routing()
+    run_experiment_f_multi_gpu_routing_large()
