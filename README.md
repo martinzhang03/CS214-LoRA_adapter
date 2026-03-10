@@ -31,6 +31,7 @@ Our approach combines:
 
 ## How We Achieve It: Simulation Design
 
+
 We do **not** run real LLM inference. Instead we simulate the **lifecycle of a request** and the **management of adapter weights** so we can measure throughput, latency, and VRAM usage in a reproducible way. The simulation has five main blocks.
 
 ### 1. Trace Generator (Workload)
@@ -42,6 +43,7 @@ We do **not** run real LLM inference. Instead we simulate the **lifecycle of a r
 **Logic:** Generate **clusters** of the same `adapter_id` to mimic real batching opportunities, plus **random outliers** to stress LRU eviction.
 
 ### 2. Adapter Manager (VRAM / RAM Control)
+
 **Purpose:** Implement the “VRAM shelf” with **LRU (Least Recently Used)** eviction.
 **Design:** A Python class that maintains two tiers:
 - **Host RAM:** A large dictionary of CPU tensors (effectively unbounded).
@@ -63,6 +65,7 @@ We do **not** run real LLM inference. Instead we simulate the **lifecycle of a r
 **Logic:** Use `torch.cuda.Stream` so that an **asynchronous prefetcher** can load the next adapter’s weights into a buffer while the current batch is running—**hiding** load latency behind compute.
 
 ### 5. Multi-GPU Cluster & Global Gateway (Distributed Routing)
+
 **Purpose:** Scale the inference pipeline horizontally across multiple simulated GPUs.
 **Logic:** Wraps the single-GPU pipeline into isolated `WorkerNode`s. A `GlobalGateway` acts as a load balancer, routing requests to the GPU that already holds the required adapter in its queue or VRAM (Affinity). It intentionally breaks affinity only if a GPU's queue depth exceeds a threshold, preventing hot-spotting via dynamic replication.
 
@@ -87,8 +90,8 @@ Two trace types are used:
 | **Memory scalability** | Increase unique adapters from 1 to 50. | Naive: VRAM grows **O(N)**. Ours: VRAM **flat**, O(1). |
 | **Scheduler efficiency** | Compare “random order” vs “grouped order” processing. | Grouped order: **staircase** latency—overhead mainly at adapter swaps. |
 | **Prefetching overlap** | Total time with vs without `cudaMemcpyAsync` (async prefetch). | Total time **decreases** as weight loading is hidden behind compute. |
-| **Multi-GPU Routing** | Stream 500 requests across a 4-GPU cluster. | Affinity Gateway shows **>80% swap reduction** over Naive Round-Robin. |
-| **Large-Scale Routing**| Stress test 2000 requests, 100 adapters on 8 GPUs. | Proves cluster stability and sharding capability under extreme memory contention (**~85% swap reduction**). |
+| **Multi-GPU Routing** | Stream 500 requests (Uniform & Skewed) across a 4-GPU cluster. | Affinity Gateway shows up to **~81% swap reduction** over Naive Round-Robin. |
+| **Large-Scale Routing**| Stress test 2000 requests, 100 adapters (Uniform & Skewed) on 8 GPUs. | Proves cluster stability under extreme memory contention (up to **~85% swap reduction**). |
 
 Testing is done in **separate** test/experiment scripts and notebooks, not inside the core implementation modules.
 
@@ -101,7 +104,9 @@ If the design is implemented and tuned correctly, the simulation should show:
 1. **Throughput:** About **3×–5×** improvement over naive reload-per-request, by avoiding long “GPU idle” periods.
 2. **Latency:** A plot of **average latency vs number of unique adapters** should look like a **staircase** (steps at swap points) rather than an exponential blow-up.
 3. **VRAM stability:** Once the adapter pool exceeds the VRAM limit, **VRAM usage** should flatten to a **horizontal line**, demonstrating that the paging system keeps memory bounded.
-4. **Massive Distributed Cache Hits (Actual):** Our `GlobalGateway` successfully auto-shards adapters across multiple GPUs. Under continuous streaming, the affinity logic reduced cache swaps by **81.6%**. Under extreme scaling (8 GPUs and 100 adapters), it reduced swaps by **85.8%**, dropping context switches from 1,324 down to just 188.
+4. **Massive Distributed Cache Hits (Actual):** Our `GlobalGateway` successfully auto-shards adapters across multiple GPUs under both uniform and skewed workloads. 
+    * Under continuous streaming (4 GPUs, 20 adapters), the affinity logic reduced cache swaps by **48.0%** for uniform traffic and **81.6%** for skewed traffic with hot-spots. 
+    * Under extreme scaling (8 GPUs and 100 adapters), it reduced swaps by **38.1%** for uniform traffic and a massive **85.8%** for skewed traffic, dropping context switches from 1,324 down to just 188. This proves the gateway effectively handles viral traffic spikes.
 
 ---
 
